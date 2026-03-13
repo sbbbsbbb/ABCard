@@ -344,6 +344,51 @@ class PaymentFlow:
         logger.info(f"Payment Method ID: {pm_id[:20]}...")
         return pm_id
 
+    # ── Step 3.7: 获取支付页面详情 (expected_amount) ──
+    def fetch_payment_page_details(self, checkout_session_id: str) -> int:
+        """
+        POST /v1/payment_pages/{checkout_session_id}
+        获取支付页面详情，提取 expected_amount
+        """
+        logger.info("[支付 3.7/5] 获取支付页面详情...")
+
+        headers = {
+            "Authorization": f"Bearer {self.stripe_pk}",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+            "Origin": "https://js.stripe.com",
+            "Referer": "https://js.stripe.com/",
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+            ),
+        }
+
+        url = f"https://api.stripe.com/v1/payment_pages/{checkout_session_id}"
+        resp = self.session.post(url, headers=headers, data={}, timeout=30)
+
+        amount = 0
+        if resp.status_code == 200:
+            data = resp.json()
+            # 尝试多个可能字段
+            amount = (
+                data.get("amount")
+                or data.get("amount_total")
+                or data.get("total", {}).get("amount", 0)
+                if isinstance(data.get("total"), dict) else data.get("amount", 0)
+            )
+            logger.info(f"Expected amount from payment page: {amount}")
+            logger.debug(f"Payment page 返回字段: {list(data.keys())}")
+        else:
+            logger.warning(f"获取支付页面详情失败 ({resp.status_code}), 使用默认 expected_amount=0")
+            try:
+                logger.debug(f"Payment page 错误: {resp.text[:300]}")
+            except Exception:
+                pass
+
+        self._expected_amount = str(amount) if amount else "0"
+        return amount
+
     # ── Step 4: 确认支付 ──
     def confirm_payment(self, checkout_session_id: str) -> PaymentResult:
         """
@@ -362,8 +407,8 @@ class PaymentFlow:
             "guid": fp["guid"],
             "muid": fp["muid"],
             "sid": fp["sid"],
-            # 预期金额 (必填)
-            "expected_amount": "0",
+            # 预期金额 (从 payment_page 获取或默认 0)
+            "expected_amount": getattr(self, '_expected_amount', "0"),
         }
 
         headers = {
@@ -414,12 +459,13 @@ class PaymentFlow:
 
     # ── 完整支付流程 ──
     def run_payment(self) -> PaymentResult:
-        """执行完整支付链路: checkout -> fingerprint -> extract PK -> tokenize card -> confirm"""
+        """执行完整支付链路: checkout -> fingerprint -> extract PK -> tokenize card -> fetch amount -> confirm"""
         try:
             cs_id = self.create_checkout_session()
             self.fetch_stripe_fingerprint()
             self.extract_stripe_pk(self.checkout_url)
             self.payment_method_id = self.create_payment_method()
+            self.fetch_payment_page_details(cs_id)
             return self.confirm_payment(cs_id)
         except Exception as e:
             self.result.error = str(e)

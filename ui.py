@@ -340,6 +340,7 @@ with tab_run:
                     log_area.code("\n".join(st.session_state.log_buffer[-60:]), language="log")
 
                     node_status["confirm"] = "running"; _refresh()
+                    pf.fetch_payment_page_details(cs_id)
                     pay = pf.confirm_payment(cs_id)
                     rd["confirm_status"] = pay.confirm_status
                     rd["confirm_response"] = pay.confirm_response
