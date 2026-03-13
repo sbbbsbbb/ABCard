@@ -462,7 +462,7 @@ class AuthFlow:
         """执行完整注册流程"""
         # 检查网络
         if not self.check_proxy():
-            raise RuntimeError("网络连接失败")
+            logger.warning("网络预检查未通过，继续尝试注册链路以获取精确错误...")
 
         # 创建邮箱
         email = mail_provider.create_mailbox()
