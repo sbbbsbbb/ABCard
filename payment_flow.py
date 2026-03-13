@@ -347,9 +347,12 @@ class PaymentFlow:
     # ── Step 3.7: 获取支付页面详情 (expected_amount) ──
     def fetch_payment_page_details(self, checkout_session_id: str) -> int:
         """
-        GET /v1/elements/sessions 获取支付 session 详情，提取 expected_amount
+        多路获取 expected_amount，避免 confirm 金额校验不一致：
+        1) POST /v1/payment_pages/{cs_id}/init
+        2) POST /v1/payment_pages/{cs_id}
+        3) GET  /v1/elements/sessions?client_secret=...
         """
-        logger.info("[支付 3.7/5] 获取支付 session 详情 (expected_amount)...")
+        logger.info("[支付 3.7/5] 获取 expected_amount...")
 
         headers = {
             "Authorization": f"Bearer {self.stripe_pk}",
@@ -362,49 +365,109 @@ class PaymentFlow:
             ),
         }
 
-        # 从 checkout_data 获取 client_secret
         client_secret = self.checkout_data.get("client_secret", "")
+
+        def _extract_amount(data: dict) -> int:
+            """从不同 Stripe 返回结构中提取金额(分)。"""
+            if not isinstance(data, dict):
+                return 0
+
+            candidates = [
+                data.get("expected_amount"),
+                data.get("amount"),
+                data.get("amount_total"),
+                data.get("amount_due"),
+            ]
+            for v in candidates:
+                if isinstance(v, int) and v >= 0:
+                    return v
+
+            total = data.get("total")
+            if isinstance(total, dict):
+                for k in ("amount", "amount_total", "amount_due"):
+                    v = total.get(k)
+                    if isinstance(v, int) and v >= 0:
+                        return v
+
+            # 常见嵌套结构
+            for key in ("checkout_session", "session", "invoice", "subscription", "payment_page"):
+                child = data.get(key)
+                if isinstance(child, dict):
+                    v = _extract_amount(child)
+                    if v:
+                        return v
+
+            line_items = data.get("line_items")
+            if isinstance(line_items, dict):
+                items = line_items.get("data", [])
+                if isinstance(items, list):
+                    s = 0
+                    for item in items:
+                        if isinstance(item, dict):
+                            s += item.get("amount_total", 0) or item.get("amount", 0)
+                    if s:
+                        return s
+
+            return 0
 
         amount = 0
 
-        # 尝试 elements/sessions
-        if client_secret:
-            params = {
-                "client_secret": client_secret,
-                "type": "payment",
-            }
-            resp = self.session.get(
+        # 1) payment_pages/{cs}/init
+        init_url = f"https://api.stripe.com/v1/payment_pages/{checkout_session_id}/init"
+        init_resp = self.session.post(init_url, headers=headers, data={}, timeout=30)
+        if init_resp.status_code == 200:
+            try:
+                init_data = init_resp.json()
+                amount = _extract_amount(init_data)
+                logger.debug(f"payment_pages/init 返回字段: {list(init_data.keys())}")
+            except Exception:
+                amount = 0
+            if amount:
+                logger.info(f"Expected amount (init): {amount}")
+
+        # 2) payment_pages/{cs}
+        if not amount:
+            page_url = f"https://api.stripe.com/v1/payment_pages/{checkout_session_id}"
+            page_resp = self.session.post(page_url, headers=headers, data={}, timeout=30)
+            if page_resp.status_code == 200:
+                try:
+                    page_data = page_resp.json()
+                    amount = _extract_amount(page_data)
+                    logger.debug(f"payment_pages 返回字段: {list(page_data.keys())}")
+                except Exception:
+                    amount = 0
+                if amount:
+                    logger.info(f"Expected amount (payment_page): {amount}")
+            else:
+                logger.warning(f"payment_pages 返回 {page_resp.status_code}")
+
+        # 3) elements/sessions
+        if not amount and client_secret:
+            params = {"client_secret": client_secret, "type": "payment"}
+            ele_resp = self.session.get(
                 "https://api.stripe.com/v1/elements/sessions",
                 headers=headers,
                 params=params,
                 timeout=30,
             )
-            if resp.status_code == 200:
-                data = resp.json()
-                logger.debug(f"elements/sessions 返回字段: {list(data.keys())}")
-
-                # 尝试各种可能的金额字段
-                if "total" in data:
-                    total = data["total"]
-                    amount = total.get("amount", 0) if isinstance(total, dict) else 0
-                elif "amount_total" in data:
-                    amount = data["amount_total"]
-                elif "amount" in data:
-                    amount = data["amount"]
-
-                # 从 line_items 或 payment_method_options 中获取
-                if not amount and "line_items" in data:
-                    items = data.get("line_items", {}).get("data", [])
-                    for item in items:
-                        amount += item.get("amount_total", 0) or item.get("amount", 0)
-
-                logger.info(f"Expected amount: {amount}")
-            else:
-                logger.warning(f"elements/sessions 返回 {resp.status_code}")
+            if ele_resp.status_code == 200:
                 try:
-                    logger.debug(f"elements/sessions 错误: {resp.text[:300]}")
+                    ele_data = ele_resp.json()
+                    amount = _extract_amount(ele_data)
+                    logger.debug(f"elements/sessions 返回字段: {list(ele_data.keys())}")
+                except Exception:
+                    amount = 0
+                if amount:
+                    logger.info(f"Expected amount (elements): {amount}")
+            else:
+                logger.warning(f"elements/sessions 返回 {ele_resp.status_code}")
+                try:
+                    logger.debug(f"elements/sessions 错误: {ele_resp.text[:300]}")
                 except Exception:
                     pass
+
+        if not amount:
+            logger.warning("未能提取 expected_amount，回退为 0")
 
         self._expected_amount = str(amount) if amount else "0"
         return amount
