@@ -28,6 +28,11 @@ logs/
 # 配置 (包含密钥)
 config.json
 
+# 数据库
+data.db
+data.db-wal
+data.db-shm
+
 # 开发测试脚本 (包含硬编码凭证)
 dev_tests/
 

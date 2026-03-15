@@ -127,6 +127,9 @@ auto_bindcard/
 ├── mail_provider.py       # 临时邮箱 + OTP
 ├── config.py              # 配置管理
 ├── ui.py                  # Web UI (Streamlit)
+├── database.py            # SQLite 数据库层
+├── code_manager.py        # 兑换码管理 (生成/验证/计次)
+├── admin_cli.py           # 兑换码管理 CLI
 ├── payment_flow.py        # API 模式支付 (备用)
 ├── http_client.py         # HTTP 客户端 (curl_cffi)
 ├── stripe_fingerprint.py  # Stripe 设备指纹
@@ -138,6 +141,33 @@ auto_bindcard/
 ├── config.example.json    # 配置模板
 ├── requirements.txt
 └── README.md
+```
+
+## 兑换码管理
+
+使用前需要先生成兑换码:
+
+```bash
+# 生成 10 个一次性兑换码
+python3 admin_cli.py generate 10
+
+# 生成 5 个可用 3 次的兑换码
+python3 admin_cli.py generate 5 --uses 3
+
+# 生成带过期时间的兑换码 (30天)
+python3 admin_cli.py generate 1 --uses 99 --expires 30 --note "VIP"
+
+# 查看所有兑换码
+python3 admin_cli.py list
+
+# 查看单个兑换码详情
+python3 admin_cli.py info XXXX-XXXX-XXXX
+
+# 查看执行历史
+python3 admin_cli.py history XXXX-XXXX-XXXX
+```
+
+用户打开 Web UI 后需要输入兑换码才能使用。**失败不扣次数**，仅成功时消耗额度。
 ```
 
 ## 环境要求

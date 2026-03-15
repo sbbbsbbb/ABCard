@@ -19,6 +19,10 @@ from mail_provider import MailProvider
 from auth_flow import AuthFlow, AuthResult
 from payment_flow import PaymentFlow
 from logger import ResultStore
+from database import init_db
+from code_manager import validate_code, reserve_use, complete_use, update_execution, get_code_history, get_code_info
+
+init_db()
 
 OUTPUT_DIR = "test_outputs"
 
@@ -386,6 +390,43 @@ st.markdown(
 # ── 开发者模式: 启动时通过 -- --dev 参数开启 ──
 # 用法: streamlit run ui.py -- --dev
 dev_mode = "--dev" in sys.argv
+
+# ═══════════════════════════════════════
+# 兑换码验证门禁
+# ═══════════════════════════════════════
+if "verified_code" not in st.session_state:
+    st.session_state.verified_code = ""
+
+if not st.session_state.verified_code:
+    st.markdown(
+        '<div style="text-align:center;margin:40px 0 20px;opacity:0.7">输入兑换码开始使用</div>',
+        unsafe_allow_html=True,
+    )
+    _code_col1, _code_col2 = st.columns([3, 1])
+    with _code_col1:
+        _input_code = st.text_input("兑换码", placeholder="XXXX-XXXX-XXXX", label_visibility="collapsed")
+    with _code_col2:
+        _verify_btn = st.button("验证", type="primary", use_container_width=True)
+    if _verify_btn and _input_code:
+        _valid, _msg = validate_code(_input_code.strip())
+        if _valid:
+            st.session_state.verified_code = _input_code.strip()
+            st.rerun()
+        else:
+            st.error(_msg)
+    st.stop()
+
+# ── 已验证: 显示兑换码状态 ──
+_code_info = get_code_info(st.session_state.verified_code)
+if _code_info:
+    _remaining = _code_info["total_uses"] - _code_info["used_count"]
+    _status_col1, _status_col2 = st.columns([5, 1])
+    with _status_col1:
+        st.caption(f"兑换码: `{st.session_state.verified_code}` — 剩余 {_remaining}/{_code_info['total_uses']} 次")
+    with _status_col2:
+        if st.button("退出", key="logout_code"):
+            st.session_state.verified_code = ""
+            st.rerun()
 
 # ── 账号来源选择 ──
 _cred_files_all = []
@@ -853,8 +894,23 @@ with tab_run:
     with btn_col2:
         stop_btn = st.button("终止", disabled=not st.session_state.running, use_container_width=True)
 
-    # ── 点击开始: 启动线程并 rerun ──
+    # ── 点击开始: 验证兑换码、预留额度、启动线程 ──
     if run_btn and not st.session_state.running:
+        # 再次验证兑换码
+        _v, _vm = validate_code(st.session_state.verified_code)
+        if not _v:
+            st.error(f"兑换码不可用: {_vm}")
+            st.stop()
+
+        # 预留一次使用额度
+        _exec_id = reserve_use(st.session_state.verified_code, plan_type=plan_type)
+        if _exec_id is None:
+            st.error("兑换码额度不足")
+            st.stop()
+
+        st.session_state._execution_id = _exec_id
+        update_execution(_exec_id, status="running")
+
         st.session_state._flow_config = {
             "proxy": proxy or None,
             "mail_domain": mail_domain, "mail_worker": mail_worker, "mail_token": mail_token,
@@ -896,6 +952,11 @@ with tab_run:
             pass
         st.session_state.running = False
         st.session_state.result = {"success": False, "error": "用户手动终止", "email": ""}
+        # 终止不扣额度
+        _eid = st.session_state.get("_execution_id")
+        if _eid:
+            complete_use(_eid, success=False, error_msg="用户手动终止")
+            st.session_state._execution_id = None
         st.warning("已终止执行")
         st.rerun()
 
@@ -911,6 +972,17 @@ with tab_run:
         if rd.get("_done"):
             st.session_state.running = False
             st.session_state.result = rd
+            # ── 完成兑换码计次 ──
+            _eid = st.session_state.get("_execution_id")
+            if _eid:
+                complete_use(
+                    _eid,
+                    success=rd.get("success", False),
+                    email=rd.get("email", ""),
+                    error_msg=rd.get("error", ""),
+                    result_json=json.dumps(rd, ensure_ascii=False, default=str),
+                )
+                st.session_state._execution_id = None
             st.rerun()
         else:
             import time as _time
@@ -945,66 +1017,53 @@ with tab_run:
 # Tab: 账号
 # ════════════════════════════════════════
 with tab_accounts:
-    csv_path = os.path.join(OUTPUT_DIR, "accounts.csv")
-    if os.path.exists(csv_path):
-        try:
-            import pandas as pd
-            df = pd.read_csv(csv_path)
-            if not df.empty:
-                st.dataframe(df, width="stretch", hide_index=True)
-                st.caption(f"共 {len(df)} 条记录")
-                if st.button("刷新", key="ref_acc"):
-                    st.rerun()
-            else:
-                st.info("暂无账号记录")
-        except Exception as e:
-            st.error(str(e))
-    else:
-        st.info("暂无账号。注册后自动保存到此处。")
+    _history = get_code_history(st.session_state.verified_code)
+    _success_rows = [r for r in _history if r["status"] == "success" and r.get("email")]
+    if _success_rows:
+        import pandas as pd
+        df = pd.DataFrame(_success_rows)[["email", "plan_type", "created_at"]]
+        df.columns = ["邮箱", "计划", "创建时间"]
+        st.dataframe(df, hide_index=True, use_container_width=True)
+        st.caption(f"共 {len(_success_rows)} 个成功账号")
 
-    st.divider()
-    with st.expander("凭证文件", expanded=False):
-        if os.path.exists(OUTPUT_DIR):
-            cred_files = sorted([f for f in os.listdir(OUTPUT_DIR) if f.startswith("credentials_") and f.endswith(".json")], reverse=True)
-            if cred_files:
-                sel = st.selectbox("选择凭证文件", cred_files, key="cred_sel")
-                if sel:
-                    with open(os.path.join(OUTPUT_DIR, sel)) as f:
-                        data = json.load(f)
-                    st.json({k: (v[:50] + "..." + v[-20:] if isinstance(v, str) and len(v) > 80 else v) for k, v in data.items()})
-            else:
-                st.caption("暂无凭证文件")
+        # 查看凭证详情
+        with st.expander("查看凭证详情", expanded=False):
+            for row in _success_rows:
+                if row.get("result_json"):
+                    try:
+                        rd = json.loads(row["result_json"])
+                        st.markdown(f"**{row['email']}**")
+                        st.json({k: (v[:50] + "..." if isinstance(v, str) and len(v) > 60 else v)
+                                 for k, v in rd.items() if k != "steps"})
+                    except Exception:
+                        pass
+    else:
+        st.info("暂无成功的账号。执行完成后自动显示。")
+
+    if st.button("刷新", key="ref_acc"):
+        st.rerun()
 
 
 # ════════════════════════════════════════
 # Tab: 历史
 # ════════════════════════════════════════
 with tab_history:
-    hist_path = os.path.join(OUTPUT_DIR, "history.csv")
-    if os.path.exists(hist_path):
-        try:
-            import pandas as pd
-            df = pd.read_csv(hist_path)
-            if not df.empty:
-                st.dataframe(df, width="stretch", hide_index=True)
-                st.caption(f"共 {len(df)} 条")
-                if st.button("刷新", key="ref_hist"):
-                    st.rerun()
-            else:
-                st.info("暂无历史")
-        except Exception as e:
-            st.error(str(e))
+    _history = get_code_history(st.session_state.verified_code)
+    if _history:
+        import pandas as pd
+        _disp = []
+        for r in _history:
+            _disp.append({
+                "状态": {"success": "✅ 成功", "failed": "❌ 失败", "running": "🔄 运行中", "pending": "⏳ 等待"}.get(r["status"], r["status"]),
+                "邮箱": r.get("email") or "-",
+                "计划": r.get("plan_type") or "-",
+                "错误": r.get("error_msg") or "",
+                "时间": r["created_at"][:19],
+            })
+        st.dataframe(pd.DataFrame(_disp), hide_index=True, use_container_width=True)
+        st.caption(f"共 {len(_history)} 条记录")
     else:
         st.info("暂无执行历史")
 
-    st.divider()
-    with st.expander("结果文件", expanded=False):
-        if os.path.exists(OUTPUT_DIR):
-            rf = sorted([f for f in os.listdir(OUTPUT_DIR) if f.endswith(".json") and not f.startswith("credentials_") and not f.startswith("debug_")], reverse=True)
-            if rf:
-                sel = st.selectbox("选择结果文件", rf, key="res_sel")
-                if sel:
-                    with open(os.path.join(OUTPUT_DIR, sel)) as f:
-                        st.json(json.load(f))
-            else:
-                st.caption("暂无结果文件")
+    if st.button("刷新", key="ref_hist"):
+        st.rerun()
