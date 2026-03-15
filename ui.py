@@ -795,8 +795,6 @@ def _run_flow_thread(rd, cs):
         elif cs["use_existing_creds"] and cs["do_checkout"]:
             if not cs["cred_access_token"]:
                 raise RuntimeError("必须提供 access_token")
-            if not cs["cred_session_token"]:
-                raise RuntimeError("必须提供 session_token")
             af = AuthFlow(cfg)
             auth_result = af.from_existing_credentials(
                 session_token=cs["cred_session_token"],

@@ -92,7 +92,7 @@ fi
 
 # ---- 7. Systemd 服务 ----
 echo ""
-echo "[7/7] 配置 systemd 服务..."
+echo "[7/8] 配置 systemd 服务..."
 
 cat > /etc/systemd/system/xvfb.service << 'EOF'
 [Unit]
@@ -142,6 +142,13 @@ systemctl start xvfb
 systemctl start auto-bindcard
 
 echo "  ✅ 服务已启动"
+
+# ---- 8. 初始化数据库 & 修复权限 ----
+echo ""
+echo "[8/8] 初始化数据库..."
+cd "$APP_DIR"
+sudo -u "$APP_USER" venv/bin/python -c "from database import init_db; init_db(); print('  ✅ 数据库已初始化')"
+chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 
 # ---- 完成 ----
 echo ""
